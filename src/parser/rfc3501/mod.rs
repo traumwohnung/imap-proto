@@ -4,6 +4,7 @@
 //! INTERNET MESSAGE ACCESS PROTOCOL
 //!
 
+use nom::Parser;
 use std::borrow::Cow;
 use std::str::from_utf8;
 
@@ -13,7 +14,7 @@ use nom::{
     character::streaming::char,
     combinator::{map, map_res, opt, recognize, value},
     multi::{many0, many1},
-    sequence::{delimited, pair, preceded, terminated, tuple},
+    sequence::{delimited, pair, preceded, terminated},
     IResult,
 };
 
@@ -35,23 +36,23 @@ fn is_tag_char(c: u8) -> bool {
 }
 
 fn status_ok(i: &[u8]) -> IResult<&[u8], Status> {
-    map(tag_no_case("OK"), |_s| Status::Ok)(i)
+    map(tag_no_case("OK"), |_s| Status::Ok).parse(i)
 }
 fn status_no(i: &[u8]) -> IResult<&[u8], Status> {
-    map(tag_no_case("NO"), |_s| Status::No)(i)
+    map(tag_no_case("NO"), |_s| Status::No).parse(i)
 }
 fn status_bad(i: &[u8]) -> IResult<&[u8], Status> {
-    map(tag_no_case("BAD"), |_s| Status::Bad)(i)
+    map(tag_no_case("BAD"), |_s| Status::Bad).parse(i)
 }
 fn status_preauth(i: &[u8]) -> IResult<&[u8], Status> {
-    map(tag_no_case("PREAUTH"), |_s| Status::PreAuth)(i)
+    map(tag_no_case("PREAUTH"), |_s| Status::PreAuth).parse(i)
 }
 fn status_bye(i: &[u8]) -> IResult<&[u8], Status> {
-    map(tag_no_case("BYE"), |_s| Status::Bye)(i)
+    map(tag_no_case("BYE"), |_s| Status::Bye).parse(i)
 }
 
 fn status(i: &[u8]) -> IResult<&[u8], Status> {
-    alt((status_ok, status_no, status_bad, status_preauth, status_bye))(i)
+    alt((status_ok, status_no, status_bad, status_preauth, status_bye)).parse(i)
 }
 
 pub(crate) fn mailbox(i: &[u8]) -> IResult<&[u8], Cow<'_, str>> {
@@ -61,19 +62,21 @@ pub(crate) fn mailbox(i: &[u8]) -> IResult<&[u8], Cow<'_, str>> {
         } else {
             s
         }
-    })(i)
+    })
+    .parse(i)
 }
 
 fn flag_extension(i: &[u8]) -> IResult<&[u8], &str> {
     map_res(
-        recognize(pair(tag(b"\\"), take_while(is_atom_char))),
+        recognize(pair(tag(&b"\\"[..]), take_while(is_atom_char))),
         from_utf8,
-    )(i)
+    )
+    .parse(i)
 }
 
 pub(crate) fn flag(i: &[u8]) -> IResult<&[u8], &str> {
     // Correct code is
-    //   alt((flag_extension, atom))(i)
+    //   alt((flag_extension, atom)).parse(i)
     //
     // Unfortunately, some unknown providers send the following response:
     // * FLAGS (OIB-Seen-[Gmail]/All)
@@ -82,12 +85,13 @@ pub(crate) fn flag(i: &[u8]) -> IResult<&[u8], &str> {
     alt((
         flag_extension,
         map_res(take_while1(is_astring_char), from_utf8),
-    ))(i)
+    ))
+    .parse(i)
 }
 
 fn flag_list(i: &[u8]) -> IResult<&[u8], Vec<Cow<'_, str>>> {
     // Correct code is
-    //   parenthesized_list(flag)(i)
+    //   parenthesized_list(flag).parse(i)
     //
     // Unfortunately, Zoho Mail Server (imap.zoho.com) sends the following response:
     // * FLAGS (\Answered \Flagged \Deleted \Seen \Draft \*)
@@ -98,86 +102,91 @@ fn flag_list(i: &[u8]) -> IResult<&[u8], Vec<Cow<'_, str>>> {
     // * FLAGS (\Answered \Flagged \Deleted \Draft \Seen $Forwarded )
     //
     // As a workaround, optional spaces before the closing bracket are allowed.
-    parenthesized_list(map(flag_perm, Cow::Borrowed))(i)
+    parenthesized_list(map(flag_perm, Cow::Borrowed)).parse(i)
 }
 
 fn flag_perm(i: &[u8]) -> IResult<&[u8], &str> {
-    alt((map_res(tag(b"\\*"), from_utf8), flag))(i)
+    alt((map_res(tag(&b"\\*"[..]), from_utf8), flag)).parse(i)
 }
 
 fn resp_text_code_alert(i: &[u8]) -> IResult<&[u8], ResponseCode<'_>> {
-    map(tag_no_case(b"ALERT"), |_| ResponseCode::Alert)(i)
+    map(tag_no_case(&b"ALERT"[..]), |_| ResponseCode::Alert).parse(i)
 }
 
 fn resp_text_code_badcharset(i: &[u8]) -> IResult<&[u8], ResponseCode<'_>> {
     map(
         preceded(
-            tag_no_case(b"BADCHARSET"),
+            tag_no_case(&b"BADCHARSET"[..]),
             opt(preceded(
-                tag(b" "),
+                tag(&b" "[..]),
                 parenthesized_nonempty_list(astring_utf8),
             )),
         ),
         ResponseCode::BadCharset,
-    )(i)
+    )
+    .parse(i)
 }
 
 fn resp_text_code_capability(i: &[u8]) -> IResult<&[u8], ResponseCode<'_>> {
-    map(capability_data, ResponseCode::Capabilities)(i)
+    map(capability_data, ResponseCode::Capabilities).parse(i)
 }
 
 fn resp_text_code_parse(i: &[u8]) -> IResult<&[u8], ResponseCode<'_>> {
-    map(tag_no_case(b"PARSE"), |_| ResponseCode::Parse)(i)
+    map(tag_no_case(&b"PARSE"[..]), |_| ResponseCode::Parse).parse(i)
 }
 
 fn resp_text_code_permanent_flags(i: &[u8]) -> IResult<&[u8], ResponseCode<'_>> {
     map(
         preceded(
-            tag_no_case(b"PERMANENTFLAGS "),
+            tag_no_case(&b"PERMANENTFLAGS "[..]),
             parenthesized_list(map(flag_perm, Cow::Borrowed)),
         ),
         ResponseCode::PermanentFlags,
-    )(i)
+    )
+    .parse(i)
 }
 
 fn resp_text_code_read_only(i: &[u8]) -> IResult<&[u8], ResponseCode<'_>> {
-    map(tag_no_case(b"READ-ONLY"), |_| ResponseCode::ReadOnly)(i)
+    map(tag_no_case(&b"READ-ONLY"[..]), |_| ResponseCode::ReadOnly).parse(i)
 }
 
 fn resp_text_code_read_write(i: &[u8]) -> IResult<&[u8], ResponseCode<'_>> {
-    map(tag_no_case(b"READ-WRITE"), |_| ResponseCode::ReadWrite)(i)
+    map(tag_no_case(&b"READ-WRITE"[..]), |_| ResponseCode::ReadWrite).parse(i)
 }
 
 fn resp_text_code_try_create(i: &[u8]) -> IResult<&[u8], ResponseCode<'_>> {
-    map(tag_no_case(b"TRYCREATE"), |_| ResponseCode::TryCreate)(i)
+    map(tag_no_case(&b"TRYCREATE"[..]), |_| ResponseCode::TryCreate).parse(i)
 }
 
 fn resp_text_code_uid_validity(i: &[u8]) -> IResult<&[u8], ResponseCode<'_>> {
     map(
-        preceded(tag_no_case(b"UIDVALIDITY "), number),
+        preceded(tag_no_case(&b"UIDVALIDITY "[..]), number),
         ResponseCode::UidValidity,
-    )(i)
+    )
+    .parse(i)
 }
 
 fn resp_text_code_uid_next(i: &[u8]) -> IResult<&[u8], ResponseCode<'_>> {
     map(
-        preceded(tag_no_case(b"UIDNEXT "), number),
+        preceded(tag_no_case(&b"UIDNEXT "[..]), number),
         ResponseCode::UidNext,
-    )(i)
+    )
+    .parse(i)
 }
 
 fn resp_text_code_unseen(i: &[u8]) -> IResult<&[u8], ResponseCode<'_>> {
     map(
-        preceded(tag_no_case(b"UNSEEN "), number),
+        preceded(tag_no_case(&b"UNSEEN "[..]), number),
         ResponseCode::Unseen,
-    )(i)
+    )
+    .parse(i)
 }
 
 fn resp_text_code(i: &[u8]) -> IResult<&[u8], ResponseCode<'_>> {
     // Per the spec, the closing tag should be "] ".
     // See `resp_text` for more on why this is done differently.
     delimited(
-        tag(b"["),
+        tag(&b"["[..]),
         alt((
             resp_text_code_alert,
             resp_text_code_badcharset,
@@ -199,19 +208,21 @@ fn resp_text_code(i: &[u8]) -> IResult<&[u8], ResponseCode<'_>> {
             rfc5464::resp_text_code_metadata_too_many,
             rfc5464::resp_text_code_metadata_no_private,
         )),
-        tag(b"]"),
-    )(i)
+        tag(&b"]"[..]),
+    )
+    .parse(i)
 }
 
 fn capability(i: &[u8]) -> IResult<&[u8], Capability<'_>> {
     alt((
-        map(tag_no_case(b"IMAP4rev1"), |_| Capability::Imap4rev1),
+        map(tag_no_case(&b"IMAP4rev1"[..]), |_| Capability::Imap4rev1),
         map(
-            map(preceded(tag_no_case(b"AUTH="), atom), Cow::Borrowed),
+            map(preceded(tag_no_case(&b"AUTH="[..]), atom), Cow::Borrowed),
             Capability::Auth,
         ),
         map(map(atom, Cow::Borrowed), Capability::Atom),
-    ))(i)
+    ))
+    .parse(i)
 }
 
 fn ensure_capabilities_contains_imap4rev(
@@ -227,11 +238,12 @@ fn ensure_capabilities_contains_imap4rev(
 fn capability_data(i: &[u8]) -> IResult<&[u8], Vec<Capability<'_>>> {
     map_res(
         preceded(
-            tag_no_case(b"CAPABILITY"),
+            tag_no_case(&b"CAPABILITY"[..]),
             many0(preceded(char(' '), capability)),
         ),
         ensure_capabilities_contains_imap4rev,
-    )(i)
+    )
+    .parse(i)
 }
 
 fn mailbox_data_search(i: &[u8]) -> IResult<&[u8], MailboxDatum<'_>> {
@@ -239,80 +251,93 @@ fn mailbox_data_search(i: &[u8]) -> IResult<&[u8], MailboxDatum<'_>> {
         // Technically, trailing whitespace is not allowed here, but multiple
         // email servers in the wild seem to have it anyway (see #34, #108).
         terminated(
-            preceded(tag_no_case(b"SEARCH"), many0(preceded(tag(" "), number))),
+            preceded(
+                tag_no_case(&b"SEARCH"[..]),
+                many0(preceded(tag(" "), number)),
+            ),
             opt(tag(" ")),
         ),
         MailboxDatum::Search,
-    )(i)
+    )
+    .parse(i)
 }
 
 fn mailbox_data_flags(i: &[u8]) -> IResult<&[u8], MailboxDatum<'_>> {
     map(
         preceded(tag_no_case("FLAGS "), flag_list),
         MailboxDatum::Flags,
-    )(i)
+    )
+    .parse(i)
 }
 
 fn mailbox_data_exists(i: &[u8]) -> IResult<&[u8], MailboxDatum<'_>> {
     map(
         terminated(number, tag_no_case(" EXISTS")),
         MailboxDatum::Exists,
-    )(i)
+    )
+    .parse(i)
 }
 
 fn name_attribute(i: &[u8]) -> IResult<&[u8], NameAttribute<'_>> {
     alt((
         // RFC 3501
-        value(NameAttribute::NoInferiors, tag_no_case(b"\\Noinferiors")),
-        value(NameAttribute::NoSelect, tag_no_case(b"\\Noselect")),
-        value(NameAttribute::Marked, tag_no_case(b"\\Marked")),
-        value(NameAttribute::Unmarked, tag_no_case(b"\\Unmarked")),
+        value(
+            NameAttribute::NoInferiors,
+            tag_no_case(&b"\\Noinferiors"[..]),
+        ),
+        value(NameAttribute::NoSelect, tag_no_case(&b"\\Noselect"[..])),
+        value(NameAttribute::Marked, tag_no_case(&b"\\Marked"[..])),
+        value(NameAttribute::Unmarked, tag_no_case(&b"\\Unmarked"[..])),
         // RFC 6154
-        value(NameAttribute::All, tag_no_case(b"\\All")),
-        value(NameAttribute::Archive, tag_no_case(b"\\Archive")),
-        value(NameAttribute::Drafts, tag_no_case(b"\\Drafts")),
-        value(NameAttribute::Flagged, tag_no_case(b"\\Flagged")),
-        value(NameAttribute::Junk, tag_no_case(b"\\Junk")),
-        value(NameAttribute::Sent, tag_no_case(b"\\Sent")),
-        value(NameAttribute::Trash, tag_no_case(b"\\Trash")),
+        value(NameAttribute::All, tag_no_case(&b"\\All"[..])),
+        value(NameAttribute::Archive, tag_no_case(&b"\\Archive"[..])),
+        value(NameAttribute::Drafts, tag_no_case(&b"\\Drafts"[..])),
+        value(NameAttribute::Flagged, tag_no_case(&b"\\Flagged"[..])),
+        value(NameAttribute::Junk, tag_no_case(&b"\\Junk"[..])),
+        value(NameAttribute::Sent, tag_no_case(&b"\\Sent"[..])),
+        value(NameAttribute::Trash, tag_no_case(&b"\\Trash"[..])),
         // Extensions not supported by this crate
         map(
             map_res(
-                recognize(pair(tag(b"\\"), take_while(is_atom_char))),
+                recognize(pair(tag(&b"\\"[..]), take_while(is_atom_char))),
                 from_utf8,
             ),
             |s| NameAttribute::Extension(Cow::Borrowed(s)),
         ),
-    ))(i)
+    ))
+    .parse(i)
 }
 
 fn mailbox_list(i: &[u8]) -> IResult<&[u8], MailboxListData<'_>> {
     map(
-        tuple((
+        (
             parenthesized_list(name_attribute),
-            tag(b" "),
+            tag(&b" "[..]),
             alt((map(quoted_utf8, Some), map(nil, |_| None))),
-            tag(b" "),
+            tag(&b" "[..]),
             mailbox,
-        )),
+        ),
         |(name_attributes, _, delimiter, _, name)| MailboxListData {
             name_attributes,
             delimiter,
             name,
         },
-    )(i)
+    )
+    .parse(i)
 }
 
 fn mailbox_data_list(i: &[u8]) -> IResult<&[u8], MailboxDatum<'_>> {
     map(preceded(tag_no_case("LIST "), mailbox_list), |data| {
         MailboxDatum::List(data)
-    })(i)
+    })
+    .parse(i)
 }
 
 fn mailbox_data_lsub(i: &[u8]) -> IResult<&[u8], MailboxDatum<'_>> {
     map(preceded(tag_no_case("LSUB "), mailbox_list), |data| {
         MailboxDatum::List(data)
-    })(i)
+    })
+    .parse(i)
 }
 
 // Unlike `status_att` in the RFC syntax, this includes the value,
@@ -340,28 +365,31 @@ fn status_att(i: &[u8]) -> IResult<&[u8], StatusAttribute> {
             preceded(tag_no_case("UNSEEN "), number),
             StatusAttribute::Unseen,
         ),
-    ))(i)
+    ))
+    .parse(i)
 }
 
 fn status_att_list(i: &[u8]) -> IResult<&[u8], Vec<StatusAttribute>> {
     // RFC 3501 specifies that the list is non-empty in the formal grammar
     //   status-att-list =  status-att SP number *(SP status-att SP number)
     // but mail.163.com sends an empty list in STATUS response anyway.
-    parenthesized_list(status_att)(i)
+    parenthesized_list(status_att).parse(i)
 }
 
 fn mailbox_data_status(i: &[u8]) -> IResult<&[u8], MailboxDatum<'_>> {
     map(
-        tuple((tag_no_case("STATUS "), mailbox, tag(" "), status_att_list)),
+        (tag_no_case("STATUS "), mailbox, tag(" "), status_att_list),
         |(_, mailbox, _, status)| MailboxDatum::Status { mailbox, status },
-    )(i)
+    )
+    .parse(i)
 }
 
 fn mailbox_data_recent(i: &[u8]) -> IResult<&[u8], MailboxDatum<'_>> {
     map(
         terminated(number, tag_no_case(" RECENT")),
         MailboxDatum::Recent,
-    )(i)
+    )
+    .parse(i)
 }
 
 fn mailbox_data(i: &[u8]) -> IResult<&[u8], MailboxDatum<'_>> {
@@ -377,14 +405,15 @@ fn mailbox_data(i: &[u8]) -> IResult<&[u8], MailboxDatum<'_>> {
         gmail::mailbox_data_gmail_msgid,
         gmail::mailbox_data_gmail_thrid,
         rfc5256::mailbox_data_sort,
-    ))(i)
+    ))
+    .parse(i)
 }
 
 // An address structure is a parenthesized list that describes an
 // electronic mail address.
 fn address(i: &[u8]) -> IResult<&[u8], Address<'_>> {
     paren_delimited(map(
-        tuple((
+        (
             nstring,
             tag(" "),
             nstring,
@@ -392,14 +421,15 @@ fn address(i: &[u8]) -> IResult<&[u8], Address<'_>> {
             nstring,
             tag(" "),
             nstring,
-        )),
+        ),
         |(name, _, adl, _, mailbox, _, host)| Address {
             name: name.map(Cow::Borrowed),
             adl: adl.map(Cow::Borrowed),
             mailbox: mailbox.map(Cow::Borrowed),
             host: host.map(Cow::Borrowed),
         },
-    ))(i)
+    ))
+    .parse(i)
 }
 
 fn opt_addresses(i: &[u8]) -> IResult<&[u8], Option<Vec<Address<'_>>>> {
@@ -409,7 +439,8 @@ fn opt_addresses(i: &[u8]) -> IResult<&[u8], Option<Vec<Address<'_>>>> {
             paren_delimited(many1(terminated(address, opt(char(' '))))),
             Some,
         ),
-    ))(i)
+    ))
+    .parse(i)
 }
 
 // envelope        = "(" env-date SP env-subject SP env-from SP
@@ -437,7 +468,7 @@ fn opt_addresses(i: &[u8]) -> IResult<&[u8], Option<Vec<Address<'_>>>> {
 // env-to          = "(" 1*address ")" / nil
 pub(crate) fn envelope(i: &[u8]) -> IResult<&[u8], Envelope<'_>> {
     paren_delimited(map(
-        tuple((
+        (
             nstring,
             tag(" "),
             nstring,
@@ -457,7 +488,7 @@ pub(crate) fn envelope(i: &[u8]) -> IResult<&[u8], Envelope<'_>> {
             nstring,
             tag(" "),
             nstring,
-        )),
+        ),
         |(
             date,
             _,
@@ -490,58 +521,66 @@ pub(crate) fn envelope(i: &[u8]) -> IResult<&[u8], Envelope<'_>> {
             in_reply_to: in_reply_to.map(Cow::Borrowed),
             message_id: message_id.map(Cow::Borrowed),
         },
-    ))(i)
+    ))
+    .parse(i)
 }
 
 fn msg_att_envelope(i: &[u8]) -> IResult<&[u8], AttributeValue<'_>> {
     map(preceded(tag_no_case("ENVELOPE "), envelope), |envelope| {
         AttributeValue::Envelope(Box::new(envelope))
-    })(i)
+    })
+    .parse(i)
 }
 
 fn msg_att_internal_date(i: &[u8]) -> IResult<&[u8], AttributeValue<'_>> {
     map(
         preceded(tag_no_case("INTERNALDATE "), nstring_utf8),
         |date| AttributeValue::InternalDate(date.unwrap()),
-    )(i)
+    )
+    .parse(i)
 }
 
 fn msg_att_flags(i: &[u8]) -> IResult<&[u8], AttributeValue<'_>> {
     map(
         preceded(tag_no_case("FLAGS "), flag_list),
         AttributeValue::Flags,
-    )(i)
+    )
+    .parse(i)
 }
 
 fn msg_att_rfc822(i: &[u8]) -> IResult<&[u8], AttributeValue<'_>> {
     map(preceded(tag_no_case("RFC822 "), nstring), |v| {
         AttributeValue::Rfc822(v.map(Cow::Borrowed))
-    })(i)
+    })
+    .parse(i)
 }
 
 fn msg_att_rfc822_header(i: &[u8]) -> IResult<&[u8], AttributeValue<'_>> {
     // extra space workaround for DavMail
     map(
-        tuple((tag_no_case("RFC822.HEADER "), opt(tag(b" ")), nstring)),
+        (tag_no_case("RFC822.HEADER "), opt(tag(&b" "[..])), nstring),
         |(_, _, raw)| AttributeValue::Rfc822Header(raw.map(Cow::Borrowed)),
-    )(i)
+    )
+    .parse(i)
 }
 
 fn msg_att_rfc822_size(i: &[u8]) -> IResult<&[u8], AttributeValue<'_>> {
     map(
         preceded(tag_no_case("RFC822.SIZE "), number),
         AttributeValue::Rfc822Size,
-    )(i)
+    )
+    .parse(i)
 }
 
 fn msg_att_rfc822_text(i: &[u8]) -> IResult<&[u8], AttributeValue<'_>> {
     map(preceded(tag_no_case("RFC822.TEXT "), nstring), |v| {
         AttributeValue::Rfc822Text(v.map(Cow::Borrowed))
-    })(i)
+    })
+    .parse(i)
 }
 
 fn msg_att_uid(i: &[u8]) -> IResult<&[u8], AttributeValue<'_>> {
-    map(preceded(tag_no_case("UID "), number), AttributeValue::Uid)(i)
+    map(preceded(tag_no_case("UID "), number), AttributeValue::Uid).parse(i)
 }
 
 // msg-att         = "(" (msg-att-dynamic / msg-att-static)
@@ -572,7 +611,8 @@ fn msg_att_emailid(i: &[u8]) -> IResult<&[u8], AttributeValue<'_>> {
             paren_delimited(map_res(take_while1(is_astring_char), from_utf8)),
         ),
         |id| AttributeValue::EmailId(Cow::Borrowed(id)),
-    )(i)
+    )
+    .parse(i)
 }
 
 // RFC 8474 §5.2 — THREADID
@@ -592,7 +632,8 @@ fn msg_att_threadid(i: &[u8]) -> IResult<&[u8], AttributeValue<'_>> {
             )),
         ),
         AttributeValue::ThreadId,
-    )(i)
+    )
+    .parse(i)
 }
 
 // Catch-all for RFC extension attributes not explicitly handled above.
@@ -617,7 +658,7 @@ fn msg_att_unknown(i: &[u8]) -> IResult<&[u8], AttributeValue<'_>> {
         pair(
             map_res(take_while1(is_atom_char), from_utf8),
             preceded(
-                tag(b" "),
+                tag(&b" "[..]),
                 alt((
                     value((), paren_delimited(take_while(|c: u8| c != b')'))),
                     value((), nstring),
@@ -626,7 +667,8 @@ fn msg_att_unknown(i: &[u8]) -> IResult<&[u8], AttributeValue<'_>> {
             ),
         ),
         |_| AttributeValue::Unknown,
-    )(i)
+    )
+    .parse(i)
 }
 
 fn msg_att(i: &[u8]) -> IResult<&[u8], AttributeValue<'_>> {
@@ -648,31 +690,34 @@ fn msg_att(i: &[u8]) -> IResult<&[u8], AttributeValue<'_>> {
         msg_att_emailid,
         msg_att_threadid,
         msg_att_unknown,
-    ))(i)
+    ))
+    .parse(i)
 }
 
 fn msg_att_list(i: &[u8]) -> IResult<&[u8], Vec<AttributeValue<'_>>> {
-    parenthesized_nonempty_list(msg_att)(i)
+    parenthesized_nonempty_list(msg_att).parse(i)
 }
 
 // message-data    = nz-number SP ("EXPUNGE" / ("FETCH" SP msg-att))
 fn message_data_fetch(i: &[u8]) -> IResult<&[u8], Response<'_>> {
     map(
-        tuple((number, tag_no_case(" FETCH "), msg_att_list)),
+        (number, tag_no_case(" FETCH "), msg_att_list),
         |(num, _, attrs)| Response::Fetch(num, attrs),
-    )(i)
+    )
+    .parse(i)
 }
 
 // message-data    = nz-number SP ("EXPUNGE" / ("FETCH" SP msg-att))
 fn message_data_expunge(i: &[u8]) -> IResult<&[u8], u32> {
-    terminated(number, tag_no_case(" EXPUNGE"))(i)
+    terminated(number, tag_no_case(" EXPUNGE")).parse(i)
 }
 
 // tag             = 1*<any ASTRING-CHAR except "+">
 fn imap_tag(i: &[u8]) -> IResult<&[u8], RequestId> {
     map(map_res(take_while1(is_tag_char), from_utf8), |s| {
         RequestId(s.to_string())
-    })(i)
+    })
+    .parse(i)
 }
 
 // This is not quite according to spec, which mandates the following:
@@ -680,7 +725,7 @@ fn imap_tag(i: &[u8]) -> IResult<&[u8], RequestId> {
 // However, examples in RFC 4551 (Conditional STORE) counteract this by giving
 // examples of `resp-text` that do not include the trailing space and text.
 fn resp_text(i: &[u8]) -> IResult<&[u8], Outcome<'_>> {
-    map(tuple((opt(resp_text_code), text)), |(code, text)| {
+    map((opt(resp_text_code), text), |(code, text)| {
         let information = if text.is_empty() {
             None
         } else if code.is_some() {
@@ -693,14 +738,16 @@ fn resp_text(i: &[u8]) -> IResult<&[u8], Outcome<'_>> {
         };
 
         Outcome { code, information }
-    })(i)
+    })
+    .parse(i)
 }
 
 // an response-text if it is at the end of a response. Empty text is then allowed without the normally needed trailing space.
 fn trailing_resp_text(i: &[u8]) -> IResult<&[u8], Outcome<'_>> {
-    map(opt(tuple((tag(b" "), resp_text))), |resptext| {
+    map(opt((tag(&b" "[..]), resp_text)), |resptext| {
         resptext.map(|(_, tuple)| tuple).unwrap_or_default()
-    })(i)
+    })
+    .parse(i)
 }
 
 // continue-req    = "+" SP (resp-text / base64) CRLF
@@ -708,9 +755,10 @@ pub(crate) fn continue_req(i: &[u8]) -> IResult<&[u8], Response<'_>> {
     // Some servers do not send the space :/
     // TODO: base64
     map(
-        tuple((tag("+"), opt(tag(" ")), resp_text, tag("\r\n"))),
+        (tag("+"), opt(tag(" ")), resp_text, tag("\r\n")),
         |(_, _, outcome, _)| Response::Continue(outcome),
-    )(i)
+    )
+    .parse(i)
 }
 
 // response-tagged = tag SP resp-cond-state CRLF
@@ -719,19 +767,20 @@ pub(crate) fn continue_req(i: &[u8]) -> IResult<&[u8], Response<'_>> {
 //                     ; Status condition
 pub(crate) fn response_tagged(i: &[u8]) -> IResult<&[u8], Response<'_>> {
     map(
-        tuple((
+        (
             imap_tag,
-            tag(b" "),
+            tag(&b" "[..]),
             status,
             trailing_resp_text,
-            tag(b"\r\n"),
-        )),
+            tag(&b"\r\n"[..]),
+        ),
         |(tag, _, status, outcome, _)| Response::Done {
             tag,
             status,
             outcome,
         },
-    )(i)
+    )
+    .parse(i)
 }
 
 // resp-cond-auth  = ("OK" / "PREAUTH") SP resp-text
@@ -742,16 +791,17 @@ pub(crate) fn response_tagged(i: &[u8]) -> IResult<&[u8], Response<'_>> {
 // resp-cond-state = ("OK" / "NO" / "BAD") SP resp-text
 //                     ; Status condition
 fn resp_cond(i: &[u8]) -> IResult<&[u8], Response<'_>> {
-    map(tuple((status, trailing_resp_text)), |(status, outcome)| {
+    map((status, trailing_resp_text), |(status, outcome)| {
         Response::Data { status, outcome }
-    })(i)
+    })
+    .parse(i)
 }
 
 // response-data   = "*" SP (resp-cond-state / resp-cond-bye /
 //                   mailbox-data / message-data / capability-data / quota) CRLF
 pub(crate) fn response_data(i: &[u8]) -> IResult<&[u8], Response<'_>> {
     delimited(
-        tag(b"* "),
+        tag(&b"* "[..]),
         alt((
             resp_cond,
             map(mailbox_data, Response::MailboxData),
@@ -770,10 +820,11 @@ pub(crate) fn response_data(i: &[u8]) -> IResult<&[u8], Response<'_>> {
             rfc4314::my_rights,
         )),
         preceded(
-            many0(tag(b" ")), // Outlook server sometimes sends whitespace at the end of STATUS response.
-            tag(b"\r\n"),
+            many0(tag(&b" "[..])), // Outlook server sometimes sends whitespace at the end of STATUS response.
+            tag(&b"\r\n"[..]),
         ),
-    )(i)
+    )
+    .parse(i)
 }
 
 #[cfg(test)]

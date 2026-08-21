@@ -5,10 +5,8 @@
 //! The IMAP QRESYNC Extensions
 //!
 
-use nom::{
-    bytes::streaming::tag_no_case, character::streaming::space1, combinator::opt, sequence::tuple,
-    IResult,
-};
+use nom::Parser;
+use nom::{bytes::streaming::tag_no_case, character::streaming::space1, combinator::opt, IResult};
 
 use crate::parser::core::sequence_set;
 use crate::types::*;
@@ -20,12 +18,13 @@ use crate::types::*;
 // numbers.
 // [RFC7162 - VANISHED RESPONSE](https://tools.ietf.org/html/rfc7162#section-3.2.10)
 pub(crate) fn resp_vanished(i: &[u8]) -> IResult<&[u8], Response<'_>> {
-    let (rest, (_, earlier, _, uids)) = tuple((
+    let (rest, (_, earlier, _, uids)) = (
         tag_no_case("VANISHED"),
-        opt(tuple((space1, tag_no_case("(EARLIER)")))),
+        opt((space1, tag_no_case("(EARLIER)"))),
         space1,
         sequence_set,
-    ))(i)?;
+    )
+        .parse(i)?;
     Ok((
         rest,
         Response::Vanished {
