@@ -1163,3 +1163,279 @@ fn test_fetch_unknown_savedate_fallback() {
         rsp => panic!("unexpected response {rsp:?}"),
     }
 }
+
+/// Parses one complete response, asserting that nothing is left over.
+fn parse_complete(input: &[u8]) -> Response<'_> {
+    match parse_response(input) {
+        Ok(([], response)) => response,
+        rsp => panic!(
+            "unexpected result {rsp:?} for {:?}",
+            String::from_utf8_lossy(input)
+        ),
+    }
+}
+
+fn list_data(input: &[u8]) -> MailboxListData<'_> {
+    match parse_complete(input) {
+        Response::MailboxData(MailboxDatum::List(data)) => data,
+        rsp => panic!("unexpected response {rsp:?}"),
+    }
+}
+
+#[test]
+fn test_list_oldname_extended_item_from_stalwart() {
+    // Stalwart 0.16 under UTF8=ACCEPT or IMAP4rev2: the modified UTF-7 name
+    // of a non-ASCII mailbox is reported as OLDNAME (RFC 9051 section 7.3.1).
+    let data = list_data(
+        b"* LIST () \"/\" \"T\xc3\xabst-\xc3\x84rchiv\" (\"OLDNAME\" (\"T&AOs-st-&AMQ-rchiv\"))\r\n",
+    );
+    assert!(data.name_attributes.is_empty());
+    assert_eq!(data.delimiter.as_deref(), Some("/"));
+    assert_eq!(data.name, "Tëst-Ärchiv");
+    assert_eq!(
+        data.extended_items,
+        vec![MailboxListExtendedItem::OldName(Cow::Borrowed(
+            "T&AOs-st-&AMQ-rchiv"
+        ))]
+    );
+
+    // The tag is an astring and case-insensitive; the old name is a mailbox.
+    let data = list_data(b"* LIST () \"/\" Archive (oldname (inbox))\r\n");
+    assert_eq!(
+        data.extended_items,
+        vec![MailboxListExtendedItem::OldName(Cow::Borrowed("INBOX"))]
+    );
+}
+
+#[test]
+fn test_list_without_extended_items() {
+    for input in [
+        &b"* LIST () \"/\" \"INBOX\"\r\n"[..],
+        b"* LIST (\\Trash) \"/\" \"Deleted Items\"\r\n",
+        b"* LIST (\\HasNoChildren) NIL Tests\r\n",
+        // Trailing whitespace stays tolerated.
+        b"* LIST () \"/\" INBOX \r\n",
+        // An empty mbox-list-extended is valid.
+        b"* LIST () \"/\" INBOX ()\r\n",
+        b"* LSUB () \".\" INBOX.Tests\r\n",
+    ] {
+        assert!(list_data(input).extended_items.is_empty());
+    }
+}
+
+#[test]
+fn test_list_childinfo_and_multiple_extended_items() {
+    // RFC 5258 section 5, example 5.
+    let data = list_data(b"* LIST () \"/\" \"Foo\" (\"CHILDINFO\" (\"SUBSCRIBED\"))\r\n");
+    assert_eq!(
+        data.extended_items,
+        vec![MailboxListExtendedItem::ChildInfo(vec![Cow::Borrowed(
+            "SUBSCRIBED"
+        )])]
+    );
+
+    let data = list_data(
+        b"* LIST (\\NonExistent) \"/\" Foo (CHILDINFO (SUBSCRIBED REMOTE) OLDNAME (\"Bar\") \"X-VENDOR\" (a (\"b c\" (d)) 3) X-NUM 1:4,7)\r\n",
+    );
+    assert_eq!(
+        data.name_attributes,
+        vec![NameAttribute::Extension(Cow::Borrowed("\\NonExistent"))]
+    );
+    assert_eq!(
+        data.extended_items,
+        vec![
+            MailboxListExtendedItem::ChildInfo(vec![
+                Cow::Borrowed("SUBSCRIBED"),
+                Cow::Borrowed("REMOTE"),
+            ]),
+            MailboxListExtendedItem::OldName(Cow::Borrowed("Bar")),
+            MailboxListExtendedItem::Other {
+                tag: Cow::Borrowed("X-VENDOR"),
+                value: Cow::Borrowed(b"(a (\"b c\" (d)) 3)"),
+            },
+            MailboxListExtendedItem::Other {
+                tag: Cow::Borrowed("X-NUM"),
+                value: Cow::Borrowed(b"1:4,7"),
+            },
+        ]
+    );
+}
+
+#[test]
+fn test_list_malformed_known_extended_item_is_kept_verbatim() {
+    // An OLDNAME that is not a parenthesized mailbox is not silently dropped.
+    let data = list_data(b"* LIST () \"/\" Foo (OLDNAME (a b))\r\n");
+    assert_eq!(
+        data.extended_items,
+        vec![MailboxListExtendedItem::Other {
+            tag: Cow::Borrowed("OLDNAME"),
+            value: Cow::Borrowed(b"(a b)"),
+        }]
+    );
+    assert_eq!(
+        list_data(b"* LIST () \"/\" Foo (CHILDINFO ())\r\n").extended_items,
+        vec![MailboxListExtendedItem::Other {
+            tag: Cow::Borrowed("CHILDINFO"),
+            value: Cow::Borrowed(b"()"),
+        }]
+    );
+}
+
+#[test]
+fn test_list_rejects_invalid_extended_data() {
+    for input in [
+        // An item needs a value.
+        &b"* LIST () \"/\" Foo (OLDNAME)\r\n"[..],
+        // Unbalanced parentheses.
+        b"* LIST () \"/\" Foo (OLDNAME (\"Bar\")\r\n",
+        // A quoted string is not a tagged-ext-val.
+        b"* LIST () \"/\" Foo (X-VENDOR \"bar\")\r\n",
+        // Extended data must be parenthesized.
+        b"* LIST () \"/\" Foo OLDNAME (\"Bar\")\r\n",
+    ] {
+        assert_matches::assert_matches!(
+            parse_response(input),
+            Err(nom::Err::Error(_)),
+            "{:?}",
+            String::from_utf8_lossy(input)
+        );
+    }
+}
+
+fn esearch(input: &[u8]) -> (Option<Cow<'_, str>>, bool, Vec<SearchReturnData<'_>>) {
+    match parse_complete(input) {
+        Response::MailboxData(MailboxDatum::ESearch {
+            correlator,
+            uid,
+            data,
+        }) => (correlator, uid, data),
+        rsp => panic!("unexpected response {rsp:?}"),
+    }
+}
+
+#[test]
+fn test_esearch_without_return_data_from_stalwart() {
+    // Stalwart 0.16 in IMAP4rev2 mode, `UID SEARCH ALL` on an empty mailbox.
+    assert_eq!(
+        esearch(b"* ESEARCH (TAG \"A0006\") UID\r\n"),
+        (Some(Cow::Borrowed("A0006")), true, vec![])
+    );
+    // ... and `SEARCH ALL`.
+    assert_eq!(
+        esearch(b"* ESEARCH (TAG \"A0009\")\r\n"),
+        (Some(Cow::Borrowed("A0009")), false, vec![])
+    );
+    // Without a correlator (RFC 4731 section 3.1).
+    assert_eq!(esearch(b"* ESEARCH\r\n"), (None, false, vec![]));
+    assert_eq!(esearch(b"* ESEARCH UID\r\n"), (None, true, vec![]));
+    assert_eq!(esearch(b"* ESEARCH UID \r\n"), (None, true, vec![]));
+}
+
+#[test]
+fn test_esearch_with_return_data() {
+    // Stalwart 0.16 in IMAP4rev2 mode, `UID SEARCH ALL` and `SEARCH ALL`.
+    assert_eq!(
+        esearch(b"* ESEARCH (TAG \"A0009\") UID ALL 1:2\r\n"),
+        (
+            Some(Cow::Borrowed("A0009")),
+            true,
+            vec![SearchReturnData::All(vec![std::ops::RangeInclusive::new(
+                1, 2
+            )])]
+        )
+    );
+    assert_eq!(
+        esearch(b"* ESEARCH (TAG \"A0011\") ALL 1:2\r\n"),
+        (
+            Some(Cow::Borrowed("A0011")),
+            false,
+            vec![SearchReturnData::All(vec![std::ops::RangeInclusive::new(
+                1, 2
+            )])]
+        )
+    );
+    // RFC 4731 section 3.1 examples, plus RFC 7162 MODSEQ.
+    assert_eq!(
+        esearch(b"* ESEARCH (TAG \"A283\") MIN 2 COUNT 3\r\n"),
+        (
+            Some(Cow::Borrowed("A283")),
+            false,
+            vec![SearchReturnData::Min(2), SearchReturnData::Count(3)]
+        )
+    );
+    assert_eq!(
+        esearch(b"* ESEARCH (TAG \"A284\") UID MIN 4 MAX 17 ALL 4:18,21,28 COUNT 0 MODSEQ 917162500\r\n"),
+        (
+            Some(Cow::Borrowed("A284")),
+            true,
+            vec![
+                SearchReturnData::Min(4),
+                SearchReturnData::Max(17),
+                SearchReturnData::All(vec![4..=18, 21..=21, 28..=28]),
+                SearchReturnData::Count(0),
+                SearchReturnData::ModSeq(917162500),
+            ]
+        )
+    );
+    // The correlator tag may be an atom (RFC 9051 tag-string = astring).
+    assert_eq!(
+        esearch(b"* esearch (tag a1) uid count 5\r\n"),
+        (
+            Some(Cow::Borrowed("a1")),
+            true,
+            vec![SearchReturnData::Count(5)]
+        )
+    );
+}
+
+#[test]
+fn test_esearch_unknown_or_malformed_return_data_is_kept_verbatim() {
+    assert_eq!(
+        esearch(b"* ESEARCH (TAG \"A1\") UID X-RELEVANCY (4 99 42) ALL 1:*\r\n"),
+        (
+            Some(Cow::Borrowed("A1")),
+            true,
+            vec![
+                SearchReturnData::Other {
+                    name: Cow::Borrowed("X-RELEVANCY"),
+                    value: Cow::Borrowed(b"(4 99 42)"),
+                },
+                SearchReturnData::Other {
+                    name: Cow::Borrowed("ALL"),
+                    value: Cow::Borrowed(b"1:*"),
+                },
+            ]
+        )
+    );
+    // `UID` is only the UID indicator when it is a whole atom.
+    assert_eq!(
+        esearch(b"* ESEARCH UIDX 7\r\n"),
+        (
+            None,
+            false,
+            vec![SearchReturnData::Other {
+                name: Cow::Borrowed("UIDX"),
+                value: Cow::Borrowed(b"7"),
+            }]
+        )
+    );
+}
+
+#[test]
+fn test_esearch_rejects_invalid_responses() {
+    for input in [
+        // A return data item needs a value.
+        &b"* ESEARCH (TAG \"A1\") UID ALL\r\n"[..],
+        // The correlator must be a TAG.
+        b"* ESEARCH (MAILBOX \"INBOX\") UID\r\n",
+        // UID follows the correlator.
+        b"* ESEARCH UID (TAG \"A1\")\r\n",
+    ] {
+        assert_matches::assert_matches!(
+            parse_response(input),
+            Err(nom::Err::Error(_)),
+            "{:?}",
+            String::from_utf8_lossy(input)
+        );
+    }
+}
