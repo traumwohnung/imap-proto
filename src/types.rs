@@ -235,6 +235,20 @@ pub enum MailboxDatum<'a> {
     GmailLabels(Vec<Cow<'a, str>>),
     GmailMsgId(u64),
     GmailThrId(u64),
+    /// `ESEARCH` response ([RFC 4731 section 3.1](https://tools.ietf.org/html/rfc4731#section-3.1),
+    /// [RFC 9051 section 7.3.4](https://tools.ietf.org/html/rfc9051#section-7.3.4)).
+    ///
+    /// IMAP4rev2 servers answer every `SEARCH` and `UID SEARCH` with `ESEARCH`.
+    ESearch {
+        /// The tag of the command this response belongs to, from the
+        /// `(TAG "...")` search correlator, if present.
+        correlator: Option<Cow<'a, str>>,
+        /// Whether the returned data refers to UIDs rather than message
+        /// sequence numbers.
+        uid: bool,
+        /// The returned data items; empty when nothing matched.
+        data: Vec<SearchReturnData<'a>>,
+    },
 }
 
 impl<'a> MailboxDatum<'a> {
@@ -269,6 +283,15 @@ impl<'a> MailboxDatum<'a> {
             }
             MailboxDatum::GmailMsgId(msgid) => MailboxDatum::GmailMsgId(msgid),
             MailboxDatum::GmailThrId(thrid) => MailboxDatum::GmailThrId(thrid),
+            MailboxDatum::ESearch {
+                correlator,
+                uid,
+                data,
+            } => MailboxDatum::ESearch {
+                correlator: correlator.map(to_owned_cow),
+                uid,
+                data: data.into_iter().map(SearchReturnData::into_owned).collect(),
+            },
         }
     }
 }
@@ -278,6 +301,10 @@ pub struct MailboxListData<'a> {
     pub name_attributes: Vec<NameAttribute<'a>>,
     pub delimiter: Option<Cow<'a, str>>,
     pub name: Cow<'a, str>,
+    /// Extended data items (`mbox-list-extended`) that follow the mailbox
+    /// name ([RFC 5258 section 9](https://tools.ietf.org/html/rfc5258#section-9),
+    /// [RFC 9051 section 7.3.1](https://tools.ietf.org/html/rfc9051#section-7.3.1)).
+    pub extended_items: Vec<MailboxListExtendedItem<'a>>,
 }
 
 impl MailboxListData<'_> {
@@ -290,6 +317,89 @@ impl MailboxListData<'_> {
                 .collect(),
             delimiter: self.delimiter.map(to_owned_cow),
             name: to_owned_cow(self.name),
+            extended_items: self
+                .extended_items
+                .into_iter()
+                .map(MailboxListExtendedItem::into_owned)
+                .collect(),
+        }
+    }
+}
+
+/// An extended data item of a `LIST` response (`mbox-list-extended-item`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum MailboxListExtendedItem<'a> {
+    /// `CHILDINFO` ([RFC 5258 section 4](https://tools.ietf.org/html/rfc5258#section-4)):
+    /// the selection options that matched children of this mailbox.
+    ChildInfo(Vec<Cow<'a, str>>),
+    /// `OLDNAME` ([RFC 9051 section 7.3.1](https://tools.ietf.org/html/rfc9051#section-7.3.1),
+    /// [RFC 5465 section 5.4](https://tools.ietf.org/html/rfc5465#section-5.4)):
+    /// the previous name of a renamed mailbox, or the name of this mailbox
+    /// in another encoding (e.g. modified UTF-7 under `UTF8=ACCEPT`).
+    OldName(Cow<'a, str>),
+    /// Any other item: its tag and the raw, unparsed `tagged-ext-val`.
+    Other {
+        tag: Cow<'a, str>,
+        value: Cow<'a, [u8]>,
+    },
+}
+
+impl MailboxListExtendedItem<'_> {
+    pub fn into_owned(self) -> MailboxListExtendedItem<'static> {
+        match self {
+            MailboxListExtendedItem::ChildInfo(options) => {
+                MailboxListExtendedItem::ChildInfo(options.into_iter().map(to_owned_cow).collect())
+            }
+            MailboxListExtendedItem::OldName(name) => {
+                MailboxListExtendedItem::OldName(to_owned_cow(name))
+            }
+            MailboxListExtendedItem::Other { tag, value } => MailboxListExtendedItem::Other {
+                tag: to_owned_cow(tag),
+                value: to_owned_cow(value),
+            },
+        }
+    }
+}
+
+/// A data item of an `ESEARCH` response (`search-return-data`,
+/// [RFC 4731 section 3.1](https://tools.ietf.org/html/rfc4731#section-3.1)).
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum SearchReturnData<'a> {
+    /// `MIN`: the lowest matching message number or UID.
+    Min(u32),
+    /// `MAX`: the highest matching message number or UID.
+    Max(u32),
+    /// `ALL`: every matching message number or UID.
+    ///
+    /// A `seq-range` may be sent in either order (`5:3` means `3:5`), so a
+    /// range can have `start() > end()`; normalize before iterating.
+    All(Vec<RangeInclusive<u32>>),
+    /// `COUNT`: the number of matching messages.
+    Count(u32),
+    /// `MODSEQ` ([RFC 7162 section 3.1.5](https://tools.ietf.org/html/rfc7162#section-3.1.5)):
+    /// the highest mod-sequence of the matching messages.
+    ModSeq(u64),
+    /// Any other item: its name and the raw, unparsed `tagged-ext-val`.
+    Other {
+        name: Cow<'a, str>,
+        value: Cow<'a, [u8]>,
+    },
+}
+
+impl SearchReturnData<'_> {
+    pub fn into_owned(self) -> SearchReturnData<'static> {
+        match self {
+            SearchReturnData::Min(n) => SearchReturnData::Min(n),
+            SearchReturnData::Max(n) => SearchReturnData::Max(n),
+            SearchReturnData::All(set) => SearchReturnData::All(set),
+            SearchReturnData::Count(n) => SearchReturnData::Count(n),
+            SearchReturnData::ModSeq(n) => SearchReturnData::ModSeq(n),
+            SearchReturnData::Other { name, value } => SearchReturnData::Other {
+                name: to_owned_cow(name),
+                value: to_owned_cow(value),
+            },
         }
     }
 }

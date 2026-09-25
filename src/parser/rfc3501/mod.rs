@@ -21,7 +21,7 @@ use nom::{
 use crate::{
     parser::{
         core::*, rfc2087, rfc2971, rfc3501::body::*, rfc3501::body_structure::*, rfc4314, rfc4315,
-        rfc4551, rfc5161, rfc5256, rfc5464, rfc7162,
+        rfc4551, rfc4731, rfc5161, rfc5256, rfc5258, rfc5464, rfc7162,
     },
     types::*,
 };
@@ -316,11 +316,13 @@ fn mailbox_list(i: &[u8]) -> IResult<&[u8], MailboxListData<'_>> {
             alt((map(quoted_utf8, Some), map(nil, |_| None))),
             tag(&b" "[..]),
             mailbox,
+            rfc5258::opt_mbox_list_extended,
         ),
-        |(name_attributes, _, delimiter, _, name)| MailboxListData {
+        |(name_attributes, _, delimiter, _, name, extended_items)| MailboxListData {
             name_attributes,
             delimiter,
             name,
+            extended_items,
         },
     )
     .parse(i)
@@ -400,6 +402,7 @@ fn mailbox_data(i: &[u8]) -> IResult<&[u8], MailboxDatum<'_>> {
         mailbox_data_lsub,
         mailbox_data_status,
         mailbox_data_recent,
+        rfc4731::mailbox_data_esearch,
         mailbox_data_search,
         gmail::mailbox_data_gmail_labels,
         gmail::mailbox_data_gmail_msgid,
