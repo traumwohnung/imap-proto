@@ -372,6 +372,9 @@ pub enum SearchReturnData<'a> {
     /// `MAX`: the highest matching message number or UID.
     Max(u32),
     /// `ALL`: every matching message number or UID.
+    ///
+    /// A `seq-range` may be sent in either order (`5:3` means `3:5`), so a
+    /// range can have `start() > end()`; normalize before iterating.
     All(Vec<RangeInclusive<u32>>),
     /// `COUNT`: the number of matching messages.
     Count(u32),

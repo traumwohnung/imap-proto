@@ -65,10 +65,28 @@ fn tagged_ext_simple(i: &[u8]) -> IResult<&[u8], &[u8]> {
 //                       ;; can always be represented as an "atom".
 //                       ;; A URL should be represented as
 //                       ;; a "quoted" string.
+//
+// The grammar nests without limit, so the nesting depth is bounded to keep a
+// hostile server from overflowing the stack of the parsing thread.
 fn tagged_ext_comp(i: &[u8]) -> IResult<&[u8], &[u8]> {
+    nested_tagged_ext_comp(i, MAX_TAGGED_EXT_COMP_DEPTH)
+}
+
+/// Parenthesis levels allowed inside a `tagged-ext-val` beyond its own.
+const MAX_TAGGED_EXT_COMP_DEPTH: usize = 32;
+
+fn nested_tagged_ext_comp(i: &[u8], depth: usize) -> IResult<&[u8], &[u8]> {
     recognize(separated_list1(
         char(' '),
-        alt((astring, recognize(paren_delimited(tagged_ext_comp)))),
+        alt((astring, |i| {
+            if depth == 0 {
+                return Err(nom::Err::Error(nom::error::make_error(
+                    i,
+                    nom::error::ErrorKind::TooLarge,
+                )));
+            }
+            recognize(paren_delimited(|i| nested_tagged_ext_comp(i, depth - 1))).parse(i)
+        })),
     ))
     .parse(i)
 }
@@ -91,6 +109,28 @@ mod tests {
             assert_eq!(tagged_ext_val(input), Ok((&b"\r\n"[..], value)));
         }
         assert!(tagged_ext_val(b"(unbalanced\r\n").is_err());
+
+        // Nesting is bounded rather than recursing without limit.
+        let nested = |depth: usize| {
+            let mut input = "(".repeat(depth + 1).into_bytes();
+            input.push(b'a');
+            input.extend(")".repeat(depth + 1).bytes());
+            input.extend(b"\r\n");
+            input
+        };
+        let input = nested(MAX_TAGGED_EXT_COMP_DEPTH);
+        assert_eq!(
+            tagged_ext_val(&input),
+            Ok((&b"\r\n"[..], &input[..input.len() - 2]))
+        );
+        assert!(matches!(
+            tagged_ext_val(&nested(MAX_TAGGED_EXT_COMP_DEPTH + 1)),
+            Err(nom::Err::Error(_))
+        ));
+        assert!(matches!(
+            tagged_ext_val(&nested(1_000_000)),
+            Err(nom::Err::Error(_))
+        ));
         assert!(tagged_ext_val(b"\"quoted\"\r\n").is_err());
     }
 
