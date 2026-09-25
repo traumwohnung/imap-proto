@@ -1234,6 +1234,14 @@ fn test_list_childinfo_and_multiple_extended_items() {
         )])]
     );
 
+    // Like other lists, CHILDINFO tolerates a space before its closing parenthesis.
+    assert_eq!(
+        list_data(b"* LIST () \"/\" Foo (CHILDINFO (SUBSCRIBED ))\r\n").extended_items,
+        vec![MailboxListExtendedItem::ChildInfo(vec![Cow::Borrowed(
+            "SUBSCRIBED"
+        )])]
+    );
+
     let data = list_data(
         b"* LIST (\\NonExistent) \"/\" Foo (CHILDINFO (SUBSCRIBED REMOTE) OLDNAME (\"Bar\") \"X-VENDOR\" (a (\"b c\" (d)) 3) X-NUM 1:4,7)\r\n",
     );

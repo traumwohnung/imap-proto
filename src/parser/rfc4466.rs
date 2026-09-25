@@ -9,10 +9,12 @@ use nom::{
     branch::alt,
     bytes::streaming::take_while1,
     character::streaming::char,
-    combinator::{opt, recognize},
+    combinator::{map, map_res, opt, recognize},
     multi::separated_list1,
     IResult,
 };
+
+use std::str::from_utf8;
 
 use crate::parser::core::{astring, paren_delimited};
 
@@ -21,15 +23,16 @@ use crate::parser::core::{astring, paren_delimited};
 // tagged-label-fchar  = ALPHA / "-" / "_" / "."
 // tagged-label-char   = tagged-label-fchar / DIGIT / ":"
 pub(crate) fn tagged_ext_label(i: &[u8]) -> IResult<&[u8], &str> {
-    let (rest, label) = recognize((
-        take_while1(is_tagged_label_fchar),
-        opt(take_while1(|c| {
-            is_tagged_label_fchar(c) || c.is_ascii_digit() || c == b':'
-        })),
-    ))
-    .parse(i)?;
-    // Only ASCII bytes were accepted above.
-    Ok((rest, std::str::from_utf8(label).unwrap()))
+    map_res(
+        recognize((
+            take_while1(is_tagged_label_fchar),
+            opt(take_while1(|c| {
+                is_tagged_label_fchar(c) || c.is_ascii_digit() || c == b':'
+            })),
+        )),
+        from_utf8,
+    )
+    .parse(i)
 }
 
 fn is_tagged_label_fchar(c: u8) -> bool {
@@ -50,6 +53,10 @@ pub(crate) fn tagged_ext_val(i: &[u8]) -> IResult<&[u8], &[u8]> {
 }
 
 // tagged-ext-simple   = sequence-set / number / number64
+//
+// Only recognized, not interpreted: unlike `core::sequence_set`, this accepts
+// the `*` seq-number, and a number64 never needs a separate branch because
+// its digits are also a sequence-set's.
 fn tagged_ext_simple(i: &[u8]) -> IResult<&[u8], &[u8]> {
     take_while1(|c: u8| c.is_ascii_digit() || c == b':' || c == b',' || c == b'*')(i)
 }
@@ -89,6 +96,25 @@ fn nested_tagged_ext_comp(i: &[u8], depth: usize) -> IResult<&[u8], &[u8]> {
         })),
     ))
     .parse(i)
+}
+
+/// Parses the `tagged-ext-val` of an extension item whose label was already
+/// consumed.
+///
+/// `known` is the result of parsing the value with the item's modelled syntax,
+/// or `None` when the label names no modelled item. An unknown item, or a
+/// known one whose value does not follow the modelled syntax, is kept
+/// verbatim through `raw` rather than rejected or dropped; other errors,
+/// such as `Incomplete`, propagate.
+pub(crate) fn known_or_raw_tagged_ext_val<'a, O>(
+    i: &'a [u8],
+    known: Option<IResult<&'a [u8], O>>,
+    raw: impl FnMut(&'a [u8]) -> O,
+) -> IResult<&'a [u8], O> {
+    match known {
+        None | Some(Err(nom::Err::Error(_))) => map(tagged_ext_val, raw).parse(i),
+        Some(result) => result,
+    }
 }
 
 #[cfg(test)]

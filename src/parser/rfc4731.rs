@@ -22,7 +22,7 @@ use std::borrow::Cow;
 use crate::{
     parser::{
         core::{astring_utf8, is_atom_char, number, number_64, sequence_set},
-        rfc4466::{tagged_ext_label, tagged_ext_val},
+        rfc4466::{known_or_raw_tagged_ext_val, tagged_ext_label},
     },
     types::{MailboxDatum, SearchReturnData},
 };
@@ -82,30 +82,21 @@ fn search_return_data(i: &[u8]) -> IResult<&[u8], SearchReturnData<'_>> {
     // a valid sequence-set here, so it must not parse as `ALL 1`.
     let item_end = || not(satisfy(|c| c != ' ' && c != '\r'));
     let known = if name.eq_ignore_ascii_case("MIN") {
-        terminated(map(number, SearchReturnData::Min), item_end()).parse(rest)
+        Some(terminated(map(number, SearchReturnData::Min), item_end()).parse(rest))
     } else if name.eq_ignore_ascii_case("MAX") {
-        terminated(map(number, SearchReturnData::Max), item_end()).parse(rest)
+        Some(terminated(map(number, SearchReturnData::Max), item_end()).parse(rest))
     } else if name.eq_ignore_ascii_case("ALL") {
-        terminated(map(sequence_set, SearchReturnData::All), item_end()).parse(rest)
+        Some(terminated(map(sequence_set, SearchReturnData::All), item_end()).parse(rest))
     } else if name.eq_ignore_ascii_case("COUNT") {
-        terminated(map(number, SearchReturnData::Count), item_end()).parse(rest)
+        Some(terminated(map(number, SearchReturnData::Count), item_end()).parse(rest))
     } else if name.eq_ignore_ascii_case("MODSEQ") {
-        terminated(map(number_64, SearchReturnData::ModSeq), item_end()).parse(rest)
+        Some(terminated(map(number_64, SearchReturnData::ModSeq), item_end()).parse(rest))
     } else {
-        Err(nom::Err::Error(nom::error::make_error(
-            rest,
-            nom::error::ErrorKind::Tag,
-        )))
+        None
     };
 
-    // A known item whose value does not follow the expected syntax, or an
-    // unknown item, is kept verbatim rather than rejected or dropped.
-    match known {
-        Err(nom::Err::Error(_)) => map(tagged_ext_val, |value| SearchReturnData::Other {
-            name: Cow::Borrowed(name),
-            value: Cow::Borrowed(value),
-        })
-        .parse(rest),
-        result => result,
-    }
+    known_or_raw_tagged_ext_val(rest, known, |value| SearchReturnData::Other {
+        name: Cow::Borrowed(name),
+        value: Cow::Borrowed(value),
+    })
 }

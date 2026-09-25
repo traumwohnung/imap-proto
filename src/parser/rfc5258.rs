@@ -8,7 +8,6 @@ use nom::Parser;
 use nom::{
     bytes::streaming::tag,
     combinator::{map, opt},
-    multi::separated_list1,
     sequence::preceded,
     IResult,
 };
@@ -16,16 +15,16 @@ use std::borrow::Cow;
 
 use crate::{
     parser::{
-        core::{astring_utf8, paren_delimited, parenthesized_list},
+        core::{astring_utf8, paren_delimited, parenthesized_list, parenthesized_nonempty_list},
         rfc3501::mailbox,
-        rfc4466::tagged_ext_val,
+        rfc4466::known_or_raw_tagged_ext_val,
     },
     types::MailboxListExtendedItem,
 };
 
 // mbox-list-extended  = "(" [mbox-list-extended-item
 //                       *(SP mbox-list-extended-item)] ")"
-pub(crate) fn mbox_list_extended(i: &[u8]) -> IResult<&[u8], Vec<MailboxListExtendedItem<'_>>> {
+fn mbox_list_extended(i: &[u8]) -> IResult<&[u8], Vec<MailboxListExtendedItem<'_>>> {
     parenthesized_list(mbox_list_extended_item).parse(i)
 }
 
@@ -42,29 +41,26 @@ fn mbox_list_extended_item(i: &[u8]) -> IResult<&[u8], MailboxListExtendedItem<'
         // childinfo-extended-item = "CHILDINFO" SP "("
         //                           list-select-base-opt-quoted
         //                           *(SP list-select-base-opt-quoted) ")"
-        paren_delimited(separated_list1(tag(" "), astring_utf8))
-            .map(MailboxListExtendedItem::ChildInfo)
-            .parse(rest)
+        Some(
+            parenthesized_nonempty_list(astring_utf8)
+                .map(MailboxListExtendedItem::ChildInfo)
+                .parse(rest),
+        )
     } else if item_tag.eq_ignore_ascii_case("OLDNAME") {
         // oldname-extended-item = "OLDNAME" SP "(" mailbox ")"
-        paren_delimited(mailbox)
-            .map(MailboxListExtendedItem::OldName)
-            .parse(rest)
+        Some(
+            paren_delimited(mailbox)
+                .map(MailboxListExtendedItem::OldName)
+                .parse(rest),
+        )
     } else {
-        Err(nom::Err::Error(nom::error::make_error(
-            rest,
-            nom::error::ErrorKind::Tag,
-        )))
+        None
     };
 
-    match known {
-        Err(nom::Err::Error(_)) => map(tagged_ext_val, |value| MailboxListExtendedItem::Other {
-            tag: item_tag.clone(),
-            value: Cow::Borrowed(value),
-        })
-        .parse(rest),
-        result => result,
-    }
+    known_or_raw_tagged_ext_val(rest, known, |value| MailboxListExtendedItem::Other {
+        tag: item_tag.clone(),
+        value: Cow::Borrowed(value),
+    })
 }
 
 // mailbox-list        = "(" [mbx-list-flags] ")" SP
